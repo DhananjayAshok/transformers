@@ -56,6 +56,12 @@ logger = logging.get_logger(__name__)
 _CHECKPOINT_FOR_DOC = "meta-llama/Llama-2-7b-hf"
 _CONFIG_FOR_DOC = "LlamaConfig"
 
+# ******
+# HIDDEN PROBE CODE
+# ******
+def probe_util_copy(x):
+    return x.detach().cpu().numpy().copy()
+
 
 class LlamaRMSNorm(nn.Module):
     def __init__(self, hidden_size, eps=1e-6):
@@ -633,6 +639,26 @@ class LlamaDecoderLayer(nn.Module):
         self.mlp = LlamaMLP(config)
         self.input_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = LlamaRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+       # ******
+        # HIDDEN PROBE CODE
+        # ******
+        # TODO: Get the config to save this
+        self.store_layers = [2, 5, 26]
+        self.store_attention = True  # must infer from config
+        self.store_mlp = True  # must infer from config
+        self.probe_hidden_output = {}
+        if layer_idx in self.store_layers:
+            if self.store_attention:
+                self.probe_hidden_output["attention"] = None
+            if self.store_mlp:
+                self.probe_hidden_output["mlp"] = None
+    # ******
+    # HIDDEN PROBE CODE
+    # ******
+    def probe_reset_hidden_output(self):
+        for key in self.probe_hidden_output.keys():
+            self.probe_hidden_output[key] = None
+
 
     def forward(
         self,
@@ -684,12 +710,23 @@ class LlamaDecoderLayer(nn.Module):
             position_embeddings=position_embeddings,
             **kwargs,
         )
+        # ******
+        # HIDDEN PROBE CODE
+        # ******
+        if "attention" in self.probe_hidden_output:
+            self.probe_hidden_output["attention"] = probe_util_copy(hidden_states)
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        # ******
+        # HIDDEN PROBE CODE
+        # ******
+        if "mlp" in self.probe_hidden_output:
+            self.probe_hidden_output["mlp"] = probe_util_copy(hidden_states)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -850,6 +887,24 @@ class LlamaModel(LlamaPreTrainedModel):
 
         # Initialize weights and apply final processing
         self.post_init()
+        # ******
+        # HIDDEN PROBE CODE
+        # ******
+        self.store_layers = [2, 5, 26] # must infer from config
+        self.store_attention = True  # must infer from config
+        self.store_mlp = True  # must infer from config
+        self.probe_hidden_output = {}
+        for layer_idx in range(config.num_hidden_layers):
+            if layer_idx in self.store_layers:
+                self.probe_hidden_output[layer_idx] = {}
+
+    # ******
+    # HIDDEN PROBE CODE
+    # ******
+    def probe_reset_hidden_output(self):
+        for layer_idx in self.probe_hidden_output:
+            self.probe_hidden_output[layer_idx] = {}
+
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -970,6 +1025,15 @@ class LlamaModel(LlamaPreTrainedModel):
         next_cache = next_decoder_cache if use_cache else None
         if return_legacy_cache:
             next_cache = next_cache.to_legacy_cache()
+        # ******
+        # HIDDEN PROBE CODE
+        # ******
+        for layer_idx in self.probe_hidden_output:
+            hidden_values_dict = self.layers[layer_idx].probe_hidden_output
+            for key in hidden_values_dict:
+                self.probe_hidden_output[layer_idx][key] = hidden_values_dict[key]
+            self.layers[layer_idx].probe_reset_hidden_output()
+
 
         if not return_dict:
             return tuple(v for v in [hidden_states, next_cache, all_hidden_states, all_self_attns] if v is not None)
@@ -1110,9 +1174,16 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
-
+        
         # Initialize weights and apply final processing
         self.post_init()
+        # ******
+        # HIDDEN PROBE CODE
+        # ******
+        self.probe_hidden_output = []
+    
+    def probe_reset_hidden_output(self):
+        self.probe_hidden_output = []
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1216,6 +1287,12 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         if not return_dict:
             output = (logits,) + outputs[1:]
             return (loss,) + output if loss is not None else output
+        
+        # ******
+        # HIDDEN PROBE CODE
+        # ******
+        self.probe_hidden_output.append(self.model.probe_hidden_output)
+        self.model.probe_reset_hidden_output()
 
         return CausalLMOutputWithPast(
             loss=loss,
