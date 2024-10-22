@@ -642,22 +642,47 @@ class LlamaDecoderLayer(nn.Module):
        # ******
         # HIDDEN PROBE CODE
         # ******
-        # TODO: Get the config to save this
-        self.store_layers = [2, 5, 26]
-        self.store_attention = True  # must infer from config
-        self.store_mlp = True  # must infer from config
-        self.attention_clip_low = None # should be a tensor
-        self.attention_clip_high = None # should be a tensor
-        self.do_attention_clip = False # should be set by the config
-        self.mlp_clip_low = None # should be a tensor
-        self.mlp_clip_high = None
-        self.do_mlp_clip = False
+        if "track_layers" in config:
+            self.track_layers = config.track_layers
+        else:
+            self.track_layers = []
+        if "track_attention" in config:
+            self.track_attention = config.track_attention
+        else:
+            self.track_attention = False
+        if "track_mlp" in config:
+            self.track_mlp = config.track_mlp 
+        else:
+            self.track_mlp = False
+        if "clamp_layers" in config:
+            self.clamp_layers = config.clamp_layers
+        else:
+            self.clamp_layers = {}
+        if layer_idx not in self.clamp_layers:
+            self.do_attention_clamp = False # should be set by the config
+            self.do_mlp_clamp = False
+        else:
+            clamp_instructions = self.clamp_layers[layer_idx]
+            if "attention" in clamp_instructions:
+                self.attention_clamp_low = clamp_instructions["attention"].get("min", None)
+                self.attention_clamp_high = clamp_instructions["attention"].get("max", None)
+            else:
+                self.attention_clamp_low = None
+                self.attention_clamp_high = None
+            self.do_attention_clamp = self.attention_clamp_low is not None or self.attention_clamp_high is not None
+            if "mlp" in clamp_instructions:
+                self.mlp_clamp_low = clamp_instructions["mlp"].get("min", None)
+                self.mlp_clamp_high = clamp_instructions["mlp"].get("max", None)
+            else:
+                self.mlp_clamp_low = None
+                self.mlp_clamp_high = None
+            self.do_mlp_clamp = self.mlp_clamp_low is not None or self.mlp_clamp_high is not None
 
         self.probe_hidden_output = {}
-        if layer_idx in self.store_layers:
-            if self.store_attention:
+        if layer_idx in self.track_layers:
+            if self.track_attention:
                 self.probe_hidden_output["attention"] = None
-            if self.store_mlp:
+            if self.track_mlp:
                 self.probe_hidden_output["mlp"] = None
 
         
@@ -724,8 +749,8 @@ class LlamaDecoderLayer(nn.Module):
         # ******
         if "attention" in self.probe_hidden_output:
             self.probe_hidden_output["attention"] = probe_util_copy(hidden_states)
-        if self.do_attention_clip:
-            hidden_states = torch.clamp(hidden_states, self.attention_clip_low, self.attention_clip_high)
+        if self.do_attention_clamp:
+            hidden_states = torch.clamp(hidden_states, self.attention_clamp_low, self.attention_clamp_high)
 
 
         hidden_states = residual + hidden_states
@@ -739,6 +764,8 @@ class LlamaDecoderLayer(nn.Module):
         # ******
         if "mlp" in self.probe_hidden_output:
             self.probe_hidden_output["mlp"] = probe_util_copy(hidden_states)
+        if self.do_mlp_clamp:
+            hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
         hidden_states = residual + hidden_states
 
         outputs = (hidden_states,)
@@ -902,12 +929,10 @@ class LlamaModel(LlamaPreTrainedModel):
         # ******
         # HIDDEN PROBE CODE
         # ******
-        self.store_layers = [2, 5, 26] # must infer from config
-        self.store_attention = True  # must infer from config
-        self.store_mlp = True  # must infer from config
+        self.track_layers = config.track_layers
         self.probe_hidden_output = {}
         for layer_idx in range(config.num_hidden_layers):
-            if layer_idx in self.store_layers:
+            if layer_idx in self.track_layers:
                 self.probe_hidden_output[layer_idx] = {}
 
     # ******
