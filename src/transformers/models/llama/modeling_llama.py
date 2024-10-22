@@ -60,7 +60,7 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 # HIDDEN PROBE CODE
 # ******
 def probe_util_copy(x):
-    return x.detach().cpu().copy()
+    return x.detach().cpu().clone()
 
 
 class LlamaRMSNorm(nn.Module):
