@@ -60,7 +60,7 @@ _CONFIG_FOR_DOC = "LlamaConfig"
 # HIDDEN PROBE CODE
 # ******
 def probe_util_copy(x):
-    return x.detach().cpu().numpy().copy()
+    return x.detach().cpu().copy()
 
 
 class LlamaRMSNorm(nn.Module):
@@ -646,12 +646,21 @@ class LlamaDecoderLayer(nn.Module):
         self.store_layers = [2, 5, 26]
         self.store_attention = True  # must infer from config
         self.store_mlp = True  # must infer from config
+        self.attention_clip_low = None # should be a tensor
+        self.attention_clip_high = None # should be a tensor
+        self.do_attention_clip = False # should be set by the config
+        self.mlp_clip_low = None # should be a tensor
+        self.mlp_clip_high = None
+        self.do_mlp_clip = False
+
         self.probe_hidden_output = {}
         if layer_idx in self.store_layers:
             if self.store_attention:
                 self.probe_hidden_output["attention"] = None
             if self.store_mlp:
                 self.probe_hidden_output["mlp"] = None
+
+        
     # ******
     # HIDDEN PROBE CODE
     # ******
@@ -715,6 +724,9 @@ class LlamaDecoderLayer(nn.Module):
         # ******
         if "attention" in self.probe_hidden_output:
             self.probe_hidden_output["attention"] = probe_util_copy(hidden_states)
+        if self.do_attention_clip:
+            hidden_states = torch.clamp(hidden_states, self.attention_clip_low, self.attention_clip_high)
+
 
         hidden_states = residual + hidden_states
 
@@ -1291,7 +1303,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # ******
         # HIDDEN PROBE CODE
         # ******
-        self.probe_hidden_output.append(self.model.probe_hidden_output)
+        self.probe_hidden_output.append(self.model.probe_hidden_output.copy())
         self.model.probe_reset_hidden_output()
 
         return CausalLMOutputWithPast(
