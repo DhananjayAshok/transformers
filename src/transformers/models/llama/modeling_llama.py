@@ -684,9 +684,8 @@ class LlamaDecoderLayer(nn.Module):
                 self.probe_hidden_output["attention"] = None
             if self.track_mlp:
                 self.probe_hidden_output["mlp"] = None
-            if config.lm_head is not None:
+            if self.track_projection:
                 self.probe_hidden_output["projection"] = None
-                self.lm_head = config.lm_head
 
         
     # ******
@@ -771,10 +770,7 @@ class LlamaDecoderLayer(nn.Module):
             hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
         hidden_states = residual + hidden_states
         if "projection" in self.probe_hidden_output:
-            projected = self.lm_head(hidden_states[:, -1])
-            projected = torch.nn.functional.log_softmax(projected, dim=-1)
-            self.probe_hidden_output["projection"] = probe_util_copy(projected)
-            del projected
+            self.probe_hidden_output["projection"] = hidden_states[:, -1]
 
         outputs = (hidden_states,)
 
@@ -1219,6 +1215,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
 
     def __init__(self, config):
         super().__init__(config)
+        self.model = LlamaModel(config)
         self.vocab_size = config.vocab_size
         self.lm_head = nn.Linear(config.hidden_size, config.vocab_size, bias=False)
         
@@ -1230,11 +1227,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         self.probe_hidden_output = []
         if config.track_projection:
             self.track_projection = True
-            config.lm_head = self.lm_head
         else:
             self.track_projection = False
-
-        self.model = LlamaModel(config)
 
     
     def probe_reset_hidden_output(self):
@@ -1350,7 +1344,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         if self.track_projection:
             chosen_token = logits[0, -1].argmax(dim=-1).detach().cpu().item()
             for layer in self.model.probe_hidden_output:
-                self.model.probe_hidden_output[layer]["projection"] = self.model.probe_hidden_output[layer]["projection"][:, chosen_token].reshape(-1, 1)
+                true_projected = self.lm_head(self.model.probe_hidden_output[layer]["projection"])[:, chosen_token]
+                true_projected = torch.nn.functional.log_softmax(true_projected, dim=-1)[:, chosen_token].reshape(-1, 1)
+                self.model.probe_hidden_output[layer]["projection"] = probe_util_copy(true_projected)
+                del true_projected
         self.probe_hidden_output.append(self.model.probe_hidden_output.copy())
         self.model.probe_reset_hidden_output()
 
