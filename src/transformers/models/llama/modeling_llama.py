@@ -1228,12 +1228,11 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # HIDDEN PROBE CODE
         # ******
         self.probe_hidden_output = []
-        self.apparent_best_tokens = []
-        if self.project_vocab:
-            self.project_vocab = True
+        if config.track_projection:
+            self.track_projection = True
             config.lm_head = self.lm_head
         else:
-            self.project_vocab = False
+            self.track_projection = False
 
         self.model = LlamaModel(config)
 
@@ -1348,9 +1347,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # ******
         # HIDDEN PROBE CODE
         # ******
-        if self.project_vocab:
+        if self.track_projection:
             chosen_token = logits[0, -1].argmax(dim=-1).detach().cpu().item()
-            self.apparent_best_tokens.append(chosen_token)
             for layer in self.model.probe_hidden_output:
                 self.model.probe_hidden_output[layer]["projection"] = self.model.probe_hidden_output[layer]["projection"][:, chosen_token].reshape(-1, 1)
         self.probe_hidden_output.append(self.model.probe_hidden_output.copy())
