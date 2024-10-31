@@ -1346,7 +1346,7 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         if self.track_projection:
             chosen_token = logits[0, -1].argmax(dim=-1).detach().cpu().item()
             for layer in self.model.probe_hidden_output:
-                true_projected = self.lm_head(self.model.probe_hidden_output[layer]["projection"])[:, chosen_token]
+                true_projected = self.lm_head(self.model.probe_hidden_output[layer]["projection"])
                 true_projected = torch.nn.functional.log_softmax(true_projected, dim=-1)[:, chosen_token].reshape(-1, 1)
                 self.model.probe_hidden_output[layer]["projection"] = probe_util_copy(true_projected)
                 del true_projected
