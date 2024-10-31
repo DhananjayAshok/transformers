@@ -654,6 +654,10 @@ class LlamaDecoderLayer(nn.Module):
             self.track_mlp = config.track_mlp 
         else:
             self.track_mlp = False
+        if "track_projection" in config:
+            self.track_projection = config.track_projection
+        else:
+            self.track_projection = False
         if "clamp_layers" in config:
             self.clamp_layers = config.clamp_layers
         else:
@@ -1225,10 +1229,8 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # HIDDEN PROBE CODE
         # ******
         self.probe_hidden_output = []
-        if config.track_projection:
-            self.track_projection = True
-        else:
-            self.track_projection = False
+        if "track_projection" in config:
+            self.track_projection = config.track_projection
 
     
     def probe_reset_hidden_output(self):
