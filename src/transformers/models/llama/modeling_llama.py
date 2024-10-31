@@ -1228,14 +1228,19 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # HIDDEN PROBE CODE
         # ******
         self.probe_hidden_output = []
+        self.apparent_best_tokens = []
         if self.project_vocab:
             self.project_vocab = True
             config.lm_head = self.lm_head
+        else:
+            self.project_vocab = False
 
         self.model = LlamaModel(config)
+
     
     def probe_reset_hidden_output(self):
         self.probe_hidden_output = []
+        self.apparent_best_tokens = []
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1345,9 +1350,9 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
         # ******
         if self.project_vocab:
             chosen_token = logits[0, -1].argmax(dim=-1).detach().cpu().item()
+            self.apparent_best_tokens.append(chosen_token)
             for layer in self.model.probe_hidden_output:
-                self.model.probe_hidden_output[layer]["projection"] = self.model.probe_hidden_output[layer]["projection"][:, :, chosen_token]
-        breakpoint()
+                self.model.probe_hidden_output[layer]["projection"] = self.model.probe_hidden_output[layer]["projection"][:, chosen_token].reshape(-1, 1)
         self.probe_hidden_output.append(self.model.probe_hidden_output.copy())
         self.model.probe_reset_hidden_output()
 
