@@ -643,7 +643,7 @@ class LlamaDecoderLayer(nn.Module):
         # HIDDEN PROBE CODE
         # ******
         if "track_layers" in config:
-            self.track_layers = config.track_layers
+            self.track_layers = [x - 1 for x in config.track_layers] # Makes the offset here
         else:
             self.track_layers = []
         if "track_attention" in config:
@@ -683,7 +683,7 @@ class LlamaDecoderLayer(nn.Module):
             self.do_mlp_clamp = self.mlp_clamp_low is not None or self.mlp_clamp_high is not None
 
         self.probe_hidden_output = {}
-        if layer_idx-1 in self.track_layers:
+        if layer_idx in self.track_layers:
             if self.track_attention:
                 self.probe_hidden_output["attention"] = None
             if self.track_mlp:
@@ -938,7 +938,7 @@ class LlamaModel(LlamaPreTrainedModel):
         # HIDDEN PROBE CODE
         # ******
         if "track_layers" in config:
-            self.track_layers = config.track_layers
+            self.track_layers = config.track_layers  # if 0 track embedding, if i track i-1th layer from self.layers
         else:
             self.track_layers = []
         if "track_mlp" in config:
@@ -1032,8 +1032,9 @@ class LlamaModel(LlamaPreTrainedModel):
         # ******
         # HIDDEN PROBE CODE
         # ******
-        if 0 in self.track_layers and self.track_mlp:
-            self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
+        if 0 in self.track_layers:
+            if self.track_mlp:
+                self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
             if self.track_projection:
                 self.probe_hidden_output[0]["projection"] = hidden_states[:, -1]
             
@@ -1092,7 +1093,7 @@ class LlamaModel(LlamaPreTrainedModel):
             hidden_values_dict = self.layers[layer_idx-1].probe_hidden_output
             for key in hidden_values_dict:
                 self.probe_hidden_output[layer_idx][key] = hidden_values_dict[key]
-            self.layers[layer_idx].probe_reset_hidden_output()
+            self.layers[layer_idx-1].probe_reset_hidden_output()
 
 
         if not return_dict:
