@@ -683,7 +683,7 @@ class LlamaDecoderLayer(nn.Module):
             self.do_mlp_clamp = self.mlp_clamp_low is not None or self.mlp_clamp_high is not None
 
         self.probe_hidden_output = {}
-        if layer_idx in self.track_layers:
+        if layer_idx-1 in self.track_layers:
             if self.track_attention:
                 self.probe_hidden_output["attention"] = None
             if self.track_mlp:
@@ -941,6 +941,8 @@ class LlamaModel(LlamaPreTrainedModel):
             self.track_layers = config.track_layers
         else:
             self.track_layers = []
+        if "track_mlp" in config:
+            self.track_mlp = config.track_mlp
         self.probe_hidden_output = {}
         for layer_idx in range(config.num_hidden_layers):
             if layer_idx in self.track_layers:
@@ -1028,6 +1030,13 @@ class LlamaModel(LlamaPreTrainedModel):
         all_self_attns = () if output_attentions else None
         next_decoder_cache = None
 
+        # ******
+        # HIDDEN PROBE CODE
+        # ******
+        if 0 in self.track_layers and self.track_mlp:
+            self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
+            
+
         for decoder_layer in self.layers:
             if output_hidden_states:
                 all_hidden_states += (hidden_states,)
@@ -1079,7 +1088,7 @@ class LlamaModel(LlamaPreTrainedModel):
         for layer_idx in self.probe_hidden_output:
             hidden_values_dict = self.layers[layer_idx].probe_hidden_output
             for key in hidden_values_dict:
-                self.probe_hidden_output[layer_idx][key] = hidden_values_dict[key]
+                self.probe_hidden_output[layer_idx+1][key] = hidden_values_dict[key]
             self.layers[layer_idx].probe_reset_hidden_output()
 
 
