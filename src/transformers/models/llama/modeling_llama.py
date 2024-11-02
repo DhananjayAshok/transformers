@@ -944,9 +944,8 @@ class LlamaModel(LlamaPreTrainedModel):
         if "track_mlp" in config:
             self.track_mlp = config.track_mlp
         self.probe_hidden_output = {}
-        for layer_idx in range(config.num_hidden_layers):
-            if layer_idx in self.track_layers:
-                self.probe_hidden_output[layer_idx] = {}
+        for layer_idx in self.track_layers:
+            self.probe_hidden_output[layer_idx] = {}
 
     # ******
     # HIDDEN PROBE CODE
@@ -1035,6 +1034,8 @@ class LlamaModel(LlamaPreTrainedModel):
         # ******
         if 0 in self.track_layers and self.track_mlp:
             self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
+            if self.track_projection:
+                self.probe_hidden_output[0]["projection"] = hidden_states[:, -1]
             
 
         for decoder_layer in self.layers:
@@ -1086,9 +1087,11 @@ class LlamaModel(LlamaPreTrainedModel):
         # HIDDEN PROBE CODE
         # ******
         for layer_idx in self.probe_hidden_output:
-            hidden_values_dict = self.layers[layer_idx].probe_hidden_output
+            if layer_idx == 0:
+                continue
+            hidden_values_dict = self.layers[layer_idx-1].probe_hidden_output
             for key in hidden_values_dict:
-                self.probe_hidden_output[layer_idx+1][key] = hidden_values_dict[key]
+                self.probe_hidden_output[layer_idx][key] = hidden_values_dict[key]
             self.layers[layer_idx].probe_reset_hidden_output()
 
 
