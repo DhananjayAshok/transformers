@@ -662,11 +662,11 @@ class LlamaDecoderLayer(nn.Module):
             self.clamp_layers = config.clamp_layers
         else:
             self.clamp_layers = {}
-        if layer_idx not in self.clamp_layers:
+        if layer_idx + 1 not in self.clamp_layers:
             self.do_attention_clamp = False # should be set by the config
             self.do_mlp_clamp = False
         else:
-            clamp_instructions = self.clamp_layers[layer_idx]
+            clamp_instructions = self.clamp_layers[layer_idx + 1]
             if "attention" in clamp_instructions:
                 self.attention_clamp_low = clamp_instructions["attention"].get("min", None)
                 self.attention_clamp_high = clamp_instructions["attention"].get("max", None)
@@ -1035,8 +1035,6 @@ class LlamaModel(LlamaPreTrainedModel):
         if 0 in self.track_layers:
             if self.track_mlp:
                 self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
-            if self.track_projection:
-                self.probe_hidden_output[0]["projection"] = hidden_states[:, -1]
             
 
         for decoder_layer in self.layers:

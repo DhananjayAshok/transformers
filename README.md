@@ -75,6 +75,213 @@ Transformer models can also perform tasks on **several modalities combined**, su
 
 🤗 Transformers is backed by the three most popular deep learning libraries — [Jax](https://jax.readthedocs.io/en/latest/), [PyTorch](https://pytorch.org/) and [TensorFlow](https://www.tensorflow.org/) — with a seamless integration between them. It's straightforward to train your models with one before loading them for inference with the other.
 
+## Adapting 🤗 Transformers for Hidden State Tracking and Intervention
+This code base inserts a few lines of code into the modeling_XX.py files of various models to enable hidden state tracking and intervention. I've tried to make the inserts minimal, and not break the rest of the library in any way. Essentially the code saves the mlp and attention outputs (both before mixing it in with the residuals) as well the projection of the mlp output to the vocabulary space as numpy arrays to a dictionary in the model. The config file is used to specific arguments for which layers and hidden states should be tracked. Given a new CausalLM, here are the steps needed to set up this system. Go to the models modeling_XX.py file (example modeling_llama.py):
+
+1. Create the probe_copy_util function:
+```python
+def probe_util_copy(x):
+    return x.detach().cpu().clone()
+```
+2. In the Decoder Class, add the following code at the end of the __init__ function
+```python
+        # Rest of the init above
+        if "track_layers" in config:
+            self.track_layers = [x - 1 for x in config.track_layers] # Makes the offset here because 0 is embedding
+        else:
+            self.track_layers = []
+        if "track_attention" in config:
+            self.track_attention = config.track_attention
+        else:
+            self.track_attention = False
+        if "track_mlp" in config:
+            self.track_mlp = config.track_mlp 
+        else:
+            self.track_mlp = False
+        if "track_projection" in config:
+            self.track_projection = config.track_projection
+        else:
+            self.track_projection = False
+        if "clamp_layers" in config:
+            self.clamp_layers = config.clamp_layers
+        else:
+            self.clamp_layers = {}
+        if layer_idx + 1 not in self.clamp_layers:
+            self.do_attention_clamp = False
+            self.do_mlp_clamp = False
+        else:
+            clamp_instructions = self.clamp_layers[layer_idx + 1]
+            if "attention" in clamp_instructions:
+                self.attention_clamp_low = clamp_instructions["attention"].get("min", None)
+                self.attention_clamp_high = clamp_instructions["attention"].get("max", None)
+            else:
+                self.attention_clamp_low = None
+                self.attention_clamp_high = None
+            self.do_attention_clamp = self.attention_clamp_low is not None or self.attention_clamp_high is not None
+            if "mlp" in clamp_instructions:
+                self.mlp_clamp_low = clamp_instructions["mlp"].get("min", None)
+                self.mlp_clamp_high = clamp_instructions["mlp"].get("max", None)
+            else:
+                self.mlp_clamp_low = None
+                self.mlp_clamp_high = None
+            self.do_mlp_clamp = self.mlp_clamp_low is not None or self.mlp_clamp_high is not None
+
+        self.probe_hidden_output = {}
+        if layer_idx in self.track_layers:
+            if self.track_attention:
+                self.probe_hidden_output["attention"] = None
+            if self.track_mlp:
+                self.probe_hidden_output["mlp"] = None
+            if self.track_projection:
+                self.probe_hidden_output["projection"] = None
+```
+3. Right after this, create a function in the Decoder class to clear the probe_hidden_outputs
+```python
+    def probe_reset_hidden_output(self):
+        for key in self.probe_hidden_output.keys():
+            self.probe_hidden_output[key] = None
+```
+4. Next, in the __forward__ function of the Decoder class, add the calls to track and intervene on the attention, mlp and projection outputs. For attention and mlp I have chosen to put them before they are mixed into the residual stream, but this is a design decision and you can put the code in either place it will run without issues
+```python
+        # after hidden_states is output by attention module
+        if "attention" in self.probe_hidden_output:
+            self.probe_hidden_output["attention"] = probe_util_copy(hidden_states)
+        if self.do_attention_clamp:
+            hidden_states = torch.clamp(hidden_states, self.attention_clamp_low, self.attention_clamp_high)
+        # after hidden_states is output by mlp module
+                if "mlp" in self.probe_hidden_output:
+            self.probe_hidden_output["mlp"] = probe_util_copy(hidden_states)
+        if self.do_mlp_clamp:
+            hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
+        
+        # after hidden_states is added to the residual (block output of the decoder, once again design decision)
+        if "projection" in self.probe_hidden_output:
+            self.probe_hidden_output["projection"] = hidden_states[:, -1] # don't convert this to numpy yet, we will do torch ops on this later        
+```
+5. Go to the Model class (not PretrainedModel) and add the tracking setup code to the __init__ function
+```python
+        # Rest of the init
+        if "track_layers" in config:
+            self.track_layers = config.track_layers  # if 0 track embedding, if i track i-1th layer from self.layers
+        else:
+            self.track_layers = []
+        if "track_mlp" in config:
+            self.track_mlp = config.track_mlp
+        self.probe_hidden_output = {}
+        for layer_idx in self.track_layers:
+            self.probe_hidden_output[layer_idx] = {}
+```
+6. Right after that add a function to the Model class
+```python
+    def probe_reset_hidden_output(self):
+        for layer_idx in self.probe_hidden_output:
+            self.probe_hidden_output[layer_idx] = {}
+```
+7. Go to the Model class __forward__ function and add
+```python
+        # After hidden states is output of embedding module
+        if 0 in self.track_layers:
+            if self.track_mlp:
+                self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
+        # Right before return
+        for layer_idx in self.probe_hidden_output:
+            if layer_idx == 0:
+                continue
+            hidden_values_dict = self.layers[layer_idx-1].probe_hidden_output
+            for key in hidden_values_dict:
+                self.probe_hidden_output[layer_idx][key] = hidden_values_dict[key]
+            self.layers[layer_idx-1].probe_reset_hidden_output()
+```
+8. Go to the ModelForCausalLM class and add to the __init__ function
+```python
+        # after init
+        self.probe_hidden_output = []
+        if "track_projection" in config:
+            self.track_projection = config.track_projection
+```
+9. Add another function to the ModelForCausalLM class
+```python
+    def probe_reset_hidden_output(self):
+        self.probe_hidden_output = []
+        self.apparent_best_tokens = []
+```
+10. Add a section in the __forward__ function of ModelForCausalLM class
+```python
+        # right before returning
+        if self.track_projection:
+            chosen_token = logits[0, -1].argmax(dim=-1).detach().cpu().item()
+            for layer in self.model.probe_hidden_output:
+                true_projected = self.lm_head(self.model.probe_hidden_output[layer]["projection"])
+                true_projected = torch.nn.functional.log_softmax(true_projected, dim=-1)[:, chosen_token].reshape(-1, 1)
+                self.model.probe_hidden_output[layer]["projection"] = probe_util_copy(true_projected)
+                del true_projected
+        self.probe_hidden_output.append(self.model.probe_hidden_output.copy())
+        self.model.probe_reset_hidden_output()
+```
+
+And you should be done! The config file controls the options here, if you dont put in any values it defaults to switching the features off and if you dont add any options it should just run the normal transformers code without any changes. The new config file options are:
+```
+track_layers: list of layers to track
+track_mlp: boolean
+track_attention: boolean
+track_projection: boolean
+do_attention_clamp: boolean
+do_mlp_clamp: boolean
+clamp_layers: dict with structure {layer_idx: {"hidden_type": {"max": numerical or array, "min": numerical or array}}} # once again, if you want to clamp the first decoder layer layer_idx in the dict should be 1 not 0
+```
+
+I have a higher level codebase that is not included in this repo for reading from this, one relevant function you may want to use is:
+```python
+def detect_hidden_states_parameters(single_token_probe_hidden_output):
+    assert isinstance(single_token_probe_hidden_output, dict)
+    layers = list(single_token_probe_hidden_output.keys())
+    assert len(layers) > 0
+    input_length = None
+    batch_size = None
+    keys = []
+    layer = layers[0]
+    if len(single_token_probe_hidden_output[layer]) == 0:
+                warnings.warn("Improper initialization (layer has no keys)")
+                return None
+    for key in single_token_probe_hidden_output[layer]:
+        if batch_size is None or input_length is None:
+            value = single_token_probe_hidden_output[layer][key]
+            if value is None:
+                warnings.warn("Trying to read hidden states before they are set / after they are reset.")
+                return None
+            else:
+                batch_size, input_length, _ = value.shape
+        keys.append(key)
+    return layers, keys, input_length, batch_size
+
+
+def read_hidden_states(probe_hidden_output):
+    if not isinstance(probe_hidden_output, list):
+         probe_hidden_output = [probe_hidden_output]
+    n_tokens_generated = len(probe_hidden_output)
+    if n_tokens_generated == 0:
+        warnings.warn("No tokens generated yet or already reset")
+        return None
+
+    details = detect_hidden_states_parameters(probe_hidden_output[0])
+    if details is None:
+        return None
+    layers, keys, input_length, batch_size = details
+    ret = {}
+    for layer in layers:
+        ret[f"layer_{layer}"] = {}
+        for key in keys:
+            ret[f"layer_{layer}"][key] = [probe_hidden_output[0][layer][key]]
+    for hidden_output in probe_hidden_output[1:]:
+         for layer in layers:
+              for key in keys:
+                   ret[f"layer_{layer}"][key].append(hidden_output[layer][key])
+    for layer in layers:
+         for key in keys:
+              ret[f"layer_{layer}"][key] = torch.cat(ret[f"layer_{layer}"][key], dim=1)[0].numpy() # batch size is always 0
+    return ret     
+```
+
 ## Online demos
 
 You can test most of our models directly on their pages from the [model hub](https://huggingface.co/models). We also offer [private model hosting, versioning, & an inference API](https://huggingface.co/pricing) for public and private models.
