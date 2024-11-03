@@ -80,12 +80,18 @@ This code base inserts a few lines of code into the modeling_XX.py files of vari
 
 1. Create the probe_copy_util function:
 ```python
+# **** 
+# HIDDEN PROBE CODE
+# ****
 def probe_util_copy(x):
     return x.detach().cpu().clone()
 ```
-2. In the Decoder Class, add the following code at the end of the __init__ function
+2. In the DecoderLayer Class, add the following code at the end of the __init__ function
 ```python
         # Rest of the init above
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         if "track_layers" in config:
             self.track_layers = [x - 1 for x in config.track_layers] # Makes the offset here because 0 is embedding
         else:
@@ -135,32 +141,45 @@ def probe_util_copy(x):
             if self.track_projection:
                 self.probe_hidden_output["projection"] = None
 ```
-3. Right after this, create a function in the Decoder class to clear the probe_hidden_outputs
+3. Right after this, create a function in the DecoderLayer class to clear the probe_hidden_outputs
 ```python
     def probe_reset_hidden_output(self):
         for key in self.probe_hidden_output.keys():
             self.probe_hidden_output[key] = None
 ```
-4. Next, in the __forward__ function of the Decoder class, add the calls to track and intervene on the attention, mlp and projection outputs. For attention and mlp I have chosen to put them before they are mixed into the residual stream, but this is a design decision and you can put the code in either place it will run without issues
+4. Next, in the __forward__ function of the DecoderLayer class, add the calls to track and intervene on the attention, mlp and projection outputs. For attention and mlp I have chosen to put them before they are mixed into the residual stream, but this is a design decision and you can put the code in either place it will run without issues
 ```python
         # after hidden_states is output by attention module
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         if "attention" in self.probe_hidden_output:
             self.probe_hidden_output["attention"] = probe_util_copy(hidden_states)
         if self.do_attention_clamp:
             hidden_states = torch.clamp(hidden_states, self.attention_clamp_low, self.attention_clamp_high)
+
         # after hidden_states is output by mlp module
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
                 if "mlp" in self.probe_hidden_output:
             self.probe_hidden_output["mlp"] = probe_util_copy(hidden_states)
         if self.do_mlp_clamp:
             hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
         
         # after hidden_states is added to the residual (block output of the decoder, once again design decision)
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         if "projection" in self.probe_hidden_output:
             self.probe_hidden_output["projection"] = hidden_states[:, -1] # don't convert this to numpy yet, we will do torch ops on this later        
 ```
 5. Go to the Model class (not PretrainedModel) and add the tracking setup code to the __init__ function
 ```python
         # Rest of the init
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         if "track_layers" in config:
             self.track_layers = config.track_layers  # if 0 track embedding, if i track i-1th layer from self.layers
         else:
@@ -180,10 +199,16 @@ def probe_util_copy(x):
 7. Go to the Model class __forward__ function and add
 ```python
         # After hidden states is output of embedding module
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         if 0 in self.track_layers:
             if self.track_mlp:
                 self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
         # Right before return
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         for layer_idx in self.probe_hidden_output:
             if layer_idx == 0:
                 continue
@@ -195,6 +220,9 @@ def probe_util_copy(x):
 8. Go to the ModelForCausalLM class and add to the __init__ function
 ```python
         # after init
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         self.probe_hidden_output = []
         if "track_projection" in config:
             self.track_projection = config.track_projection
@@ -208,6 +236,9 @@ def probe_util_copy(x):
 10. Add a section in the __forward__ function of ModelForCausalLM class
 ```python
         # right before returning
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
         if self.track_projection:
             chosen_token = logits[0, -1].argmax(dim=-1).detach().cpu().item()
             for layer in self.model.probe_hidden_output:
@@ -281,6 +312,7 @@ def read_hidden_states(probe_hidden_output):
               ret[f"layer_{layer}"][key] = torch.cat(ret[f"layer_{layer}"][key], dim=1)[0].numpy() # batch size is always 0
     return ret     
 ```
+To see an example of this, see the [Llama model](src/transformers/models/llama/modeling_llama.py) (Search for the pattern 'HIDDEN PROBE CODE')
 
 ## Online demos
 

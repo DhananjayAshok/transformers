@@ -59,6 +59,11 @@ logger = logging.get_logger(__name__)
 _CHECKPOINT_FOR_DOC = "mistralai/Mistral-7B-v0.1"
 _CONFIG_FOR_DOC = "MistralConfig"
 
+# **** 
+# HIDDEN PROBE CODE
+# ****
+def probe_util_copy(x):
+    return x.detach().cpu().clone()
 
 # Copied from transformers.models.llama.modeling_llama.LlamaRMSNorm with Llama->Mistral
 class MistralRMSNorm(nn.Module):
@@ -489,6 +494,61 @@ class MistralDecoderLayer(nn.Module):
         self.mlp = MistralMLP(config)
         self.input_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
         self.post_attention_layernorm = MistralRMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        if "track_layers" in config:
+            self.track_layers = [x - 1 for x in config.track_layers] # Makes the offset here because 0 is embedding
+        else:
+            self.track_layers = []
+        if "track_attention" in config:
+            self.track_attention = config.track_attention
+        else:
+            self.track_attention = False
+        if "track_mlp" in config:
+            self.track_mlp = config.track_mlp 
+        else:
+            self.track_mlp = False
+        if "track_projection" in config:
+            self.track_projection = config.track_projection
+        else:
+            self.track_projection = False
+        if "clamp_layers" in config:
+            self.clamp_layers = config.clamp_layers
+        else:
+            self.clamp_layers = {}
+        if layer_idx + 1 not in self.clamp_layers:
+            self.do_attention_clamp = False
+            self.do_mlp_clamp = False
+        else:
+            clamp_instructions = self.clamp_layers[layer_idx + 1]
+            if "attention" in clamp_instructions:
+                self.attention_clamp_low = clamp_instructions["attention"].get("min", None)
+                self.attention_clamp_high = clamp_instructions["attention"].get("max", None)
+            else:
+                self.attention_clamp_low = None
+                self.attention_clamp_high = None
+            self.do_attention_clamp = self.attention_clamp_low is not None or self.attention_clamp_high is not None
+            if "mlp" in clamp_instructions:
+                self.mlp_clamp_low = clamp_instructions["mlp"].get("min", None)
+                self.mlp_clamp_high = clamp_instructions["mlp"].get("max", None)
+            else:
+                self.mlp_clamp_low = None
+                self.mlp_clamp_high = None
+            self.do_mlp_clamp = self.mlp_clamp_low is not None or self.mlp_clamp_high is not None
+
+        self.probe_hidden_output = {}
+        if layer_idx in self.track_layers:
+            if self.track_attention:
+                self.probe_hidden_output["attention"] = None
+            if self.track_mlp:
+                self.probe_hidden_output["mlp"] = None
+            if self.track_projection:
+                self.probe_hidden_output["projection"] = None
+
+    def probe_reset_hidden_output(self):
+        for key in self.probe_hidden_output.keys():
+            self.probe_hidden_output[key] = None
 
     def forward(
         self,
@@ -535,13 +595,34 @@ class MistralDecoderLayer(nn.Module):
             cache_position=cache_position,
             **kwargs,
         )
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        if "attention" in self.probe_hidden_output:
+            self.probe_hidden_output["attention"] = probe_util_copy(hidden_states)
+        if self.do_attention_clamp:
+            hidden_states = torch.clamp(hidden_states, self.attention_clamp_low, self.attention_clamp_high)
+
         hidden_states = residual + hidden_states
 
         # Fully Connected
         residual = hidden_states
         hidden_states = self.post_attention_layernorm(hidden_states)
         hidden_states = self.mlp(hidden_states)
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        if "mlp" in self.probe_hidden_output:
+            self.probe_hidden_output["mlp"] = probe_util_copy(hidden_states)
+        if self.do_mlp_clamp:
+            hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
+
         hidden_states = residual + hidden_states
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        if "projection" in self.probe_hidden_output:
+            self.probe_hidden_output["projection"] = hidden_states[:, -1] # don't convert this to numpy yet, we will do torch ops on this later
 
         outputs = (hidden_states,)
 
@@ -696,6 +777,24 @@ class MistralModel(MistralPreTrainedModel):
         self.gradient_checkpointing = False
         # Initialize weights and apply final processing
         self.post_init()
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        if "track_layers" in config:
+            self.track_layers = config.track_layers  # if 0 track embedding, if i track i-1th layer from self.layers
+        else:
+            self.track_layers = []
+        if "track_mlp" in config:
+            self.track_mlp = config.track_mlp
+        self.probe_hidden_output = {}
+        for layer_idx in self.track_layers:
+            self.probe_hidden_output[layer_idx] = {}
+
+
+    def probe_reset_hidden_output(self):
+        for layer_idx in self.probe_hidden_output:
+            self.probe_hidden_output[layer_idx] = {}
+
 
     def get_input_embeddings(self):
         return self.embed_tokens
@@ -767,6 +866,13 @@ class MistralModel(MistralPreTrainedModel):
 
         hidden_states = inputs_embeds
 
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        if 0 in self.track_layers:
+            if self.track_mlp:
+                self.probe_hidden_output[0]["mlp"] = probe_util_copy(hidden_states)
+
         # decoder layers
         all_hidden_states = () if output_hidden_states else None
         all_self_attns = () if output_attentions else None
@@ -807,6 +913,17 @@ class MistralModel(MistralPreTrainedModel):
                 all_self_attns += (layer_outputs[1],)
 
         hidden_states = self.norm(hidden_states)
+
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        for layer_idx in self.probe_hidden_output:
+            if layer_idx == 0:
+                continue
+            hidden_values_dict = self.layers[layer_idx-1].probe_hidden_output
+            for key in hidden_values_dict:
+                self.probe_hidden_output[layer_idx][key] = hidden_values_dict[key]
+            self.layers[layer_idx-1].probe_reset_hidden_output()
 
         # add hidden states from the last decoder layer
         if output_hidden_states:
@@ -988,6 +1105,16 @@ class MistralForCausalLM(MistralPreTrainedModel, GenerationMixin):
 
         # Initialize weights and apply final processing
         self.post_init()
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        self.probe_hidden_output = []
+        if "track_projection" in config:
+            self.track_projection = config.track_projection
+
+    def probe_reset_hidden_output(self):
+        self.probe_hidden_output = []
+        self.apparent_best_tokens = []
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
@@ -1093,6 +1220,19 @@ class MistralForCausalLM(MistralPreTrainedModel, GenerationMixin):
             shift_labels = shift_labels.to(shift_logits.device)
             loss_fct = CrossEntropyLoss()
             loss = loss_fct(shift_logits, shift_labels)
+
+        # **** 
+        # HIDDEN PROBE CODE
+        # ****
+        if self.track_projection:
+            chosen_token = logits[0, -1].argmax(dim=-1).detach().cpu().item()
+            for layer in self.model.probe_hidden_output:
+                true_projected = self.lm_head(self.model.probe_hidden_output[layer]["projection"])
+                true_projected = torch.nn.functional.log_softmax(true_projected, dim=-1)[:, chosen_token].reshape(-1, 1)
+                self.model.probe_hidden_output[layer]["projection"] = probe_util_copy(true_projected)
+                del true_projected
+        self.probe_hidden_output.append(self.model.probe_hidden_output.copy())
+        self.model.probe_reset_hidden_output()
 
         if not return_dict:
             output = (logits,) + outputs[1:]
