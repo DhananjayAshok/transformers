@@ -162,7 +162,7 @@ def probe_util_copy(x):
         # **** 
         # HIDDEN PROBE CODE
         # ****
-                if "mlp" in self.probe_hidden_output:
+        if "mlp" in self.probe_hidden_output:
             self.probe_hidden_output["mlp"] = probe_util_copy(hidden_states)
         if self.do_mlp_clamp:
             hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
