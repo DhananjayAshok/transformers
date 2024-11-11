@@ -112,8 +112,14 @@ def probe_util_copy(x):
             self.clamp_layers = config.clamp_layers
         else:
             self.clamp_layers = {}
+
+        if "shift_activations" in config:
+            self.shift_activations = config.shift_activations
+        else:
+            self.shift_activations = {} # dictionary of layer_idx -> {hidden_key -> (numpy vector to shift along, shift_strength)}
+        assert self.clamp_layers == {} or self.shift_activations == {}, "Cannot have both clamp_layers and shift_activations set"
         if layer_idx + 1 not in self.clamp_layers:
-            self.do_attention_clamp = False
+            self.do_attention_clamp = False # should be set by the config
             self.do_mlp_clamp = False
         else:
             clamp_instructions = self.clamp_layers[layer_idx + 1]
@@ -131,6 +137,24 @@ def probe_util_copy(x):
                 self.mlp_clamp_low = None
                 self.mlp_clamp_high = None
             self.do_mlp_clamp = self.mlp_clamp_low is not None or self.mlp_clamp_high is not None
+
+        if layer_idx +1 not in self.shift_activations:
+            self.shift_attention = False
+            self.shift_mlp = False
+        else:
+            shift_instructions = self.shift_activations[layer_idx + 1]
+            if "attention" in shift_instructions:
+                self.shift_attention_vector = shift_instructions["attention"]["vector"]
+                self.shift_attention_strength = shift_instructions["attention"]["strength"]
+                self.shift_attention = True
+            else:
+                self.shift_attention = False
+            if "mlp" in shift_instructions:
+                self.shift_mlp_vector = shift_instructions["mlp"]["vector"]
+                self.shift_mlp_strength = shift_instructions["mlp"]["strength"]
+                self.shift_mlp = True
+            else:
+                self.shift_mlp = False
 
         self.probe_hidden_output = {}
         if layer_idx in self.track_layers:
@@ -157,6 +181,9 @@ def probe_util_copy(x):
             self.probe_hidden_output["attention"] = probe_util_copy(hidden_states)
         if self.do_attention_clamp:
             hidden_states = torch.clamp(hidden_states, self.attention_clamp_low, self.attention_clamp_high)
+        if self.shift_attention:
+            attention_torch_vector = torch.tensor(self.shift_attention_vector, device=hidden_states.device)
+            hidden_states = hidden_states + self.shift_attention_strength * attention_torch_vector    
 
         # after hidden_states is output by mlp module
         # **** 
@@ -166,6 +193,9 @@ def probe_util_copy(x):
             self.probe_hidden_output["mlp"] = probe_util_copy(hidden_states)
         if self.do_mlp_clamp:
             hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
+        if self.shift_mlp:
+            mlp_torch_vector = torch.tensor(self.shift_mlp_vector, device=hidden_states.device)
+            hidden_states = hidden_states + self.shift_mlp_strength * mlp_torch_vector
         
         # after hidden_states is added to the residual (block output of the decoder, once again design decision)
         # **** 
