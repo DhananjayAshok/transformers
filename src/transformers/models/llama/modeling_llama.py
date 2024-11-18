@@ -786,7 +786,7 @@ class LlamaDecoderLayer(nn.Module):
         if self.do_attention_clamp:
             hidden_states = torch.clamp(hidden_states, self.attention_clamp_low, self.attention_clamp_high)
         if self.shift_attention:
-            attention_torch_vector = torch.tensor(self.shift_attention_vector, device=hidden_states.device)
+            attention_torch_vector = torch.tensor(self.shift_attention_vector, device=hidden_states.device, dtype=hidden_states.dtype)
             hidden_states = hidden_states + self.shift_attention_strength * attention_torch_vector
 
 
