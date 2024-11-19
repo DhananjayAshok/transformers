@@ -727,6 +727,13 @@ class LlamaDecoderLayer(nn.Module):
         for key in self.probe_hidden_output.keys():
             self.probe_hidden_output[key] = None
 
+    def set_intervention_strength(self, new_intervention_strength):
+        if self.shift_attention:
+            self.shift_attention_strength = new_intervention_strength
+        if self.shift_mlp:
+            self.shift_mlp_strength = new_intervention_strength
+        return
+
 
     def forward(
         self,
@@ -804,7 +811,7 @@ class LlamaDecoderLayer(nn.Module):
         if self.do_mlp_clamp:
             hidden_states = torch.clamp(hidden_states, self.mlp_clamp_low, self.mlp_clamp_high)
         if self.shift_mlp:
-            mlp_torch_vector = torch.tensor(self.shift_mlp_vector, device=hidden_states.device)
+            mlp_torch_vector = torch.tensor(self.shift_mlp_vector, device=hidden_states.device, dtype=hidden_states.dtype)
             hidden_states = hidden_states + self.shift_mlp_strength * mlp_torch_vector
         hidden_states = residual + hidden_states
         if "projection" in self.probe_hidden_output:
@@ -987,6 +994,11 @@ class LlamaModel(LlamaPreTrainedModel):
     def probe_reset_hidden_output(self):
         for layer_idx in self.probe_hidden_output:
             self.probe_hidden_output[layer_idx] = {}
+
+    def set_intervention_strength(self, new_intervention_strength):
+        for layer in self.layers:
+            layer.set_intervention_strength(new_intervention_strength)
+        return
 
 
     def get_input_embeddings(self):
@@ -1287,6 +1299,10 @@ class LlamaForCausalLM(LlamaPreTrainedModel, GenerationMixin):
     def probe_reset_hidden_output(self):
         self.probe_hidden_output = []
         self.apparent_best_tokens = []
+
+    def set_intervention_strength(self, new_intervention_strength):
+        self.model.set_intervention_strength(new_intervention_strength)
+        return
 
     def get_input_embeddings(self):
         return self.model.embed_tokens
